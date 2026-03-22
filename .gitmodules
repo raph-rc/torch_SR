@@ -1,0 +1,3 @@
+[submodule "minc2-simple"]
+	path = minc2-simple
+	url = https://github.com/NIST-MNI/minc2-simple.git

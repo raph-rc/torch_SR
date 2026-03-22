@@ -15,28 +15,55 @@ Key reference files:
 ## Directory Structure
 
 ```
-upsample/    Core PyTorch implementation (package)
-upsample/tests/       pytest test suite
-upsample/data/        Sample volumes for testing
-upsample/scripts/     CLI utility scripts
-legacy/      Original Matlab/C implementation (reference only)
-minc2-simple/ MINC2 file I/O submodule
+upsample/                    Project root — run all commands from here
+upsample/requirements.txt    pip dependencies (torch, numpy, scipy, cffi)
+upsample/setup.py
+
+upsample/sr/                 Python package (import as `sr`)
+  __init__.py                re-exports nlm_upsample
+  exceptions.py              UpsampleError base class
+  nlm_core.c                 C implementation (MEX-free port of cMRegularizarNLM3D_V2.c)
+  nlm_core.h                 Public C header
+  _nlm_build.py              cffi out-of-line build script (run once)
+  regularize.py              Python wrapper: regularize(volume, v, f, sigma, factors)
+  interpolate.py             initial_interpolation(lr_vol, factors) — scipy spline
+  core.py                    nlm_upsample() — full pipeline
+
+upsample/tests/              pytest suite
+  conftest.py                shared fixtures (small_volume)
+  test_interpolate.py        tests for sr.interpolate (no C ext needed)
+  test_regularize.py         tests for sr.regularize  (needs C ext)
+  test_core.py               integration tests         (needs C ext)
+
+upsample/data/               sample .mnc volumes for testing (not committed)
+upsample/scripts/
+  nlm_upsample.py            CLI: input.mnc output.mnc [options]
+
+legacy/                      Original Matlab/C reference (read-only)
+  demo/NLMUpsample/NLMUpsample2.m                top-level Matlab driver
+  demo/NLMUpsample/linux-mac code/cMRegularizarNLM3D_V2.c  C MEX core
+
+minc2-simple/                MINC2 I/O submodule
+  example/python/minc/io.py               load/save helpers
+  example/python/resample_pytorch_nl.py   PyTorch grid_sample patterns
 ```
 
 ## Build Commands
 
+Run all commands from `upsample/`:
+
 ```bash
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
 
-# Run all tests
+# Build the C extension (run once; produces sr/_nlm_core.*.so)
+python sr/_nlm_build.py
+
+# Run all tests (interpolate tests run without C ext; others auto-skip)
 pytest tests/
 
 # Run a single test file
 pytest tests/test_core.py -v
-
-# Run a single test function
-pytest tests/test_core.py::test_function_name -v
 
 # Run tests matching a keyword
 pytest tests/ -k "keyword" -v

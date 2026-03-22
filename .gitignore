@@ -1,3 +1,6 @@
 __pycache__
 *.pyc
-sr.egg-info
+*.so
+*.o
+*.egg-info
+*.mnc
