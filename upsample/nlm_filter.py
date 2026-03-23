@@ -60,6 +60,12 @@ def _parse_args() -> argparse.Namespace:
                         "(set to the upsampling factors if input is an "
                         "already-interpolated HR volume)")
 
+    p.add_argument("--h", type=float, default=1.0,
+                   metavar="H",
+                   help="Multiplicative factor applied to sigma: "
+                        "real_sigma = h * sigma. Values > 1 increase "
+                        "smoothing; values < 1 reduce it.")
+
     # Sigma / noise level
     sigma_grp = p.add_mutually_exclusive_group()
     sigma_grp.add_argument("--sigma", type=float, default=None,
@@ -176,6 +182,15 @@ def main() -> None:
         if args.verbose:
             print(f"  sigma: min={sig_np_est.min():.3f}  max={sig_np_est.max():.3f}  "
                   f"mean={sig_np_est.mean():.3f}")
+
+    # ---- apply h multiplier ------------------------------------------------
+    if args.h != 1.0:
+        sigma_t = sigma_t * args.h
+        if args.verbose:
+            print(f"Sigma × h={args.h}: "
+                  f"min={sigma_t.min().item():.3f}  "
+                  f"max={sigma_t.max().item():.3f}  "
+                  f"mean={sigma_t.mean().item():.3f}")
 
     # ---- regularize --------------------------------------------------------
     from sr_pytorch.regularize import regularize
