@@ -33,15 +33,20 @@ def regularize(
     f: int,
     sigma: torch.Tensor,
     factors: Tuple[int, int, int],
+    mean_preserve: bool = True,
 ) -> torch.Tensor:
     """NLM regularization – PyTorch implementation.
 
     Args:
-        volume: Input volume, shape ``(D, H, W)``, float.
-        v:      Search-neighbourhood radius.
-        f:      Patch half-size; patch covers ``(2f+1)³`` voxels.
-        sigma:  Per-voxel noise-level estimate, same shape as *volume*.
-        factors: Upsampling factors ``(fz, fy, fx)``.
+        volume:        Input volume, shape ``(D, H, W)``, float.
+        v:             Search-neighbourhood radius.
+        f:             Patch half-size; patch covers ``(2f+1)³`` voxels.
+        sigma:         Per-voxel noise-level estimate, same shape as *volume*.
+        factors:       Upsampling factors ``(fz, fy, fx)``.
+        mean_preserve: When ``True`` (default) each ``(fz×fy×fx)`` output
+                       block is shifted to match its input block mean.
+                       Set to ``False`` for pure per-voxel NLM filtering
+                       (denoising / post-processing without upsampling context).
 
     Returns:
         Regularized volume, same shape and device as *volume*.
@@ -62,13 +67,14 @@ def regularize(
                         v : v + W + 2*f]             # (D+2f, H+2f, W+2f)
 
     # ---- block means of volume for mean-preservation -----------------------
-    block_means = F.avg_pool3d(
-        vol5, kernel_size=(fz, fy, fx), stride=(fz, fy, fx)
-    ).squeeze(0).squeeze(0)
-    block_means_full = (block_means
-                        .repeat_interleave(fz, 0)
-                        .repeat_interleave(fy, 1)
-                        .repeat_interleave(fx, 2))   # (D, H, W)
+    if mean_preserve:
+        block_means = F.avg_pool3d(
+            vol5, kernel_size=(fz, fy, fx), stride=(fz, fy, fx)
+        ).squeeze(0).squeeze(0)
+        block_means_full = (block_means
+                            .repeat_interleave(fz, 0)
+                            .repeat_interleave(fy, 1)
+                            .repeat_interleave(fx, 2))   # (D, H, W)
 
     # ---- local means for fast mean-difference rejection --------------------
     # Use reflect padding (matches C kernel mirror BC, not zero-padding)
@@ -135,6 +141,9 @@ def regularize(
     output = (volume + weighted_sum) / weight_total
 
     # ---- mean-preservation correction -------------------------------------
+    if not mean_preserve:
+        return output
+
     out5 = output.unsqueeze(0).unsqueeze(0)
     out_block_means = F.avg_pool3d(
         out5, kernel_size=(fz, fy, fx), stride=(fz, fy, fx)

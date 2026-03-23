@@ -80,6 +80,11 @@ def _parse_args() -> argparse.Namespace:
                    help="Floating-point dtype. "
                         "Defaults to float32 on CUDA, float64 on CPU.")
 
+    p.add_argument("--no-mean-preserve", action="store_true",
+                   help="Disable the mean-preservation block correction. "
+                        "Use this for pure per-voxel NLM filtering "
+                        "(denoising / post-processing) where upsampling "
+                        "block structure does not apply.")
     p.add_argument("--verbose", action="store_true",
                    help="Print progress and parameter summary")
     return p.parse_args()
@@ -123,7 +128,9 @@ def main() -> None:
 
     if args.verbose:
         print(f"Device  : {device}  dtype={dtype}")
-        print(f"Params  : v={args.v}  f={args.f}  factors={factors}")
+        mean_preserve = not args.no_mean_preserve
+        print(f"Params  : v={args.v}  f={args.f}  factors={factors}  "
+              f"mean_preserve={mean_preserve}")
 
     # ---- load input --------------------------------------------------------
     if args.verbose:
@@ -176,7 +183,8 @@ def main() -> None:
     if args.verbose:
         print("Running NLM regularization …")
 
-    out_t = regularize(vol_t, args.v, args.f, sigma_t, factors)
+    out_t = regularize(vol_t, args.v, args.f, sigma_t, factors,
+                       mean_preserve=not args.no_mean_preserve)
     out_np = out_t.cpu().to(torch.float64).numpy()
 
     if args.verbose:
