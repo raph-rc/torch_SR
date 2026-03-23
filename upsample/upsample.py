@@ -73,6 +73,22 @@ def _parse_args() -> argparse.Namespace:
         help="Stop after N NLM iterations regardless of convergence (0 = run to convergence)",
     )
     p.add_argument(
+        "--method",
+        choices=["c", "pytorch"],
+        default=None,
+        help=(
+            "NLM backend: 'c' uses the compiled C extension (default when available), "
+            "'pytorch' uses the pure-PyTorch implementation (GPU-capable)"
+        ),
+    )
+    p.add_argument(
+        "--device",
+        default=None,
+        metavar="DEVICE",
+        help="PyTorch device string, e.g. 'cpu', 'cuda', 'cuda:1' (pytorch method only; "
+             "defaults to 'cuda' if available, else 'cpu')",
+    )
+    p.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print iteration-level progress",
@@ -132,16 +148,31 @@ def main() -> None:
             f"Detail: {exc}"
         )
 
-    # ---- C extension check --------------------------------------------
+    # ---- resolve backend ----------------------------------------------
     from sr.regularize import have_c_ext
-    if not have_c_ext() and not args.initial_only:
-        sys.exit(
-            "ERROR: C extension not built.\n"
-            "Run:  python upsample/sr/_nlm_build.py"
-        )
-
-    from sr.core import nlm_upsample
     from sr.interpolate import initial_interpolation
+
+    method = args.method
+    if not args.initial_only:
+        if method is None:
+            method = "c" if have_c_ext() else "pytorch"
+
+        if method == "c":
+            if not have_c_ext():
+                sys.exit(
+                    "ERROR: C extension not built (required by --method c).\n"
+                    "Run:  python upsample/sr/_nlm_build.py"
+                )
+            from sr.core import nlm_upsample
+            print(f"  Backend     : C extension")
+        else:
+            try:
+                from sr_pytorch.core import nlm_upsample
+            except ImportError as exc:
+                sys.exit(f"ERROR: Could not import sr_pytorch: {exc}")
+            import torch
+            device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"  Backend     : PyTorch  device={device}")
 
     # ---- Load ---------------------------------------------------------
     print(f"Loading {args.input}")
@@ -173,12 +204,14 @@ def main() -> None:
         print("Running initial spline interpolation only …")
         hr = initial_interpolation(vol, factors)
     else:
-        kw = dict(factors=factors, v=args.v, f=args.f, tol=args.tol)
+        kw: dict = dict(factors=factors, v=args.v, f=args.f, tol=args.tol)
         if args.max_iter > 0:
             kw["max_iter"] = args.max_iter
             print(f"Running NLM upsampling (max {args.max_iter} iterations) …")
         else:
             print("Running NLM iterative upsampling (to convergence) …")
+        if method == "pytorch":
+            kw["device"] = device
         hr = nlm_upsample(vol, **kw)
 
     # ---- Adjust geometry ----------------------------------------------
