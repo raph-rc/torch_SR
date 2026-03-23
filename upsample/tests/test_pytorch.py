@@ -52,6 +52,17 @@ _PT_SPLINE_FLOORS: dict[int, float] = {
     7: 15.2,
 }
 
+# ---------------------------------------------------------------------------
+# PSNR floors for optimize method (measured at n_steps=100, lr=0.02 − 1.0 dB)
+# Measured:  factor 2→25.658  3→21.974  5→18.857  7→17.238
+# ---------------------------------------------------------------------------
+_PT_OPT_FLOORS: dict[int, float] = {
+    2: 24.6,   # 25.658 - 1.0
+    3: 21.0,   # 21.974 - 1.0
+    5: 17.8,   # 18.857 - 1.0
+    7: 16.2,   # 17.238 - 1.0
+}
+
 
 def _load_fixture(factor: int) -> Tuple[np.ndarray, np.ndarray, int]:
     path = DATA_DIR / f"psnr_factor_{factor}.npz"
@@ -154,4 +165,94 @@ def test_nlm_psnr_floor(factor: int, floor_db: float, device: str) -> None:
     assert psnr >= floor_db, (
         f"factor={f} device={device}: "
         f"PSNR {psnr:.3f} dB below floor {floor_db:.1f} dB"
+    )
+
+
+# Optimize method is experimental and not tested in CI.
+_OPT_DEVICES = pytest.mark.skip(reason="optimize method is experimental — not run in CI")
+
+# ---------------------------------------------------------------------------
+# Test 6 — optimize: output shape
+# ---------------------------------------------------------------------------
+
+@_OPT_DEVICES
+@pytest.mark.parametrize("factors", [(2, 2, 2), (2, 1, 1), (3, 2, 1)])
+def test_optimize_output_shape(factors):
+    from sr_pytorch.optimize import nlm_sr_optimize
+
+    lr = np.random.rand(8, 10, 12).astype(np.float64) * 100 + 50
+    hr = nlm_sr_optimize(lr, factors=factors, n_steps=3, device="cuda")
+    expected = tuple(s * f for s, f in zip(lr.shape, factors))
+    assert hr.shape == expected
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — optimize: no NaN / Inf
+# ---------------------------------------------------------------------------
+
+@_OPT_DEVICES
+def test_optimize_no_nan_inf():
+    from sr_pytorch.optimize import nlm_sr_optimize
+
+    lr = np.random.rand(8, 8, 8).astype(np.float64) * 200 + 10
+    hr = nlm_sr_optimize(lr, factors=(2, 2, 2), n_steps=5, device="cuda")
+    assert np.all(np.isfinite(hr))
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — optimize: uniform input stays (nearly) uniform
+# ---------------------------------------------------------------------------
+
+@_OPT_DEVICES
+def test_optimize_uniform_input():
+    from sr_pytorch.optimize import nlm_sr_optimize
+
+    lr = np.full((6, 6, 6), 128.0, dtype=np.float64)
+    hr = nlm_sr_optimize(lr, factors=(2, 2, 2), n_steps=5, device="cuda")
+    assert np.allclose(hr, 128.0, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — optimize: absolute PSNR floor
+# ---------------------------------------------------------------------------
+
+@_OPT_DEVICES
+@pytest.mark.parametrize(
+    "factor,floor_db",
+    [(f, _PT_OPT_FLOORS[f]) for f in [2, 3, 5, 7]],
+)
+def test_optimize_psnr_floor(factor: int, floor_db: float) -> None:
+    from sr_pytorch.optimize import nlm_sr_optimize
+
+    lr, hr, f = _load_fixture(factor)
+    out = nlm_sr_optimize(lr, factors=(f, f, f), n_steps=100,
+                          device="cuda", dtype=torch.float32)
+    psnr = compute_psnr(hr, out)
+    assert psnr >= floor_db, (
+        f"factor={f}: optimize PSNR {psnr:.3f} dB below floor {floor_db:.1f} dB"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — optimize vs spline PSNR comparison
+# ---------------------------------------------------------------------------
+
+@_OPT_DEVICES
+@pytest.mark.parametrize("factor", [2, 3, 5, 7])
+def test_optimize_vs_spline(factor: int) -> None:
+    """Optimize PSNR must not fall more than 0.5 dB below spline baseline."""
+    from sr_pytorch.optimize import nlm_sr_optimize
+    from sr.interpolate import initial_interpolation
+
+    lr, hr, f = _load_fixture(factor)
+
+    psnr_spline = compute_psnr(hr, initial_interpolation(lr, (f, f, f)))
+    psnr_opt = compute_psnr(
+        hr, nlm_sr_optimize(lr, factors=(f, f, f), n_steps=100,
+                            device="cuda", dtype=torch.float32)
+    )
+
+    assert psnr_opt >= psnr_spline - 0.5, (
+        f"factor={f}: optimize PSNR {psnr_opt:.3f} dB vs spline {psnr_spline:.3f} dB "
+        f"(diff {psnr_opt - psnr_spline:+.3f} dB)"
     )

@@ -74,12 +74,28 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--method",
-        choices=["c", "pytorch"],
+        choices=["c", "pytorch", "optimize"],
         default=None,
         help=(
             "NLM backend: 'c' uses the compiled C extension (default when available), "
-            "'pytorch' uses the pure-PyTorch implementation (GPU-capable)"
+            "'pytorch' uses the pure-PyTorch iterative implementation (GPU-capable), "
+            "'optimize' uses Adam optimization of an additive HR correction field "
+            "(EXPERIMENTAL: slower than pytorch and not better in PSNR)"
         ),
+    )
+    p.add_argument(
+        "--n-steps",
+        type=int,
+        default=100,
+        metavar="N",
+        help="Number of Adam optimization steps (optimize method only)",
+    )
+    p.add_argument(
+        "--lr",
+        type=float,
+        default=0.02,
+        metavar="LR",
+        help="Adam learning rate (optimize method only)",
     )
     p.add_argument(
         "--device",
@@ -165,6 +181,14 @@ def main() -> None:
                 )
             from sr.core import nlm_upsample
             print(f"  Backend     : C extension")
+        elif method == "optimize":
+            try:
+                from sr_pytorch.optimize import nlm_sr_optimize
+            except ImportError as exc:
+                sys.exit(f"ERROR: Could not import sr_pytorch.optimize: {exc}")
+            import torch
+            device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"  Backend     : optimize  device={device}")
         else:
             try:
                 from sr_pytorch.core import nlm_upsample
@@ -203,6 +227,18 @@ def main() -> None:
     if args.initial_only:
         print("Running initial spline interpolation only …")
         hr = initial_interpolation(vol, factors)
+    elif method == "optimize":
+        print(f"Running optimization-based SR (n_steps={args.n_steps}, lr={args.lr}) …")
+        hr = nlm_sr_optimize(
+            vol,
+            factors=factors,
+            v=args.v,
+            f=args.f,
+            n_steps=args.n_steps,
+            lr_rate=args.lr,
+            device=device,
+            verbose=args.verbose,
+        )
     else:
         kw: dict = dict(factors=factors, v=args.v, f=args.f, tol=args.tol)
         if args.max_iter > 0:
