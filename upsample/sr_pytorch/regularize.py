@@ -46,7 +46,7 @@ Backported from ``torch_n3.blocks.denoise`` — a fork of this file, made for
 plain denoising rather than SR upsampling — which added a ``strength``
 multiplier and an affine-equivariant noise floor.  Both are opt-in and
 default to exactly today's behaviour, so every existing caller
-(``sr_pytorch/core.py``, ``sr_pytorch/optimize.py``, ``upsample/nlm_filter.py``,
+(``sr_pytorch/core.py``, ``sr_pytorch/optimize.py``, ``upsample/denoise.py``,
 and the PSNR floors in ``tests/test_psnr.py``) is unaffected.
 
 ``strength`` (default ``1.0``)

@@ -1,45 +1,62 @@
 #!/usr/bin/env python3
-"""Filter a MINC2 volume with one non-local-means pass (pure denoising).
+"""Filter a MINC2 volume with one non-local-means pass.
 
     python upsample/denoise.py input.mnc output.mnc [options]
 
-This is a plain per-voxel NLM filter, not the SR upsampling pipeline: it
-calls ``sr_pytorch.regularize.regularize`` with ``factors=(1, 1, 1)`` and
-``mean_preserve=False``, so there is no block-mean correction to disable.
-Backported from ``torch_n3/denoise_cli.py``, restructured to reuse this
-project's own conventions (``sr.minc.io`` for I/O, the same CLI shape as
-``upsample/nlm_filter.py``) instead of torch_n3's ``Volume`` class.
+A single call to ``sr_pytorch.regularize.regularize``, exposed directly.
+By default this is a plain per-voxel NLM filter (``--factors 1 1 1``, no
+block-mean correction); pass ``--factors`` to enable the mean-preservation
+correction used when post-processing an already spline-interpolated volume
+from the SR pipeline.
 
-Sigma modes (``--sigma``)
---------------------------
-Mirrors mincnlm's convention, same as ``torch_n3.blocks.denoise.denoise``:
+Sigma sources
+-------------
+Exactly one of four mutually exclusive flags decides where the noise level
+comes from:
 
-* omitted (default) — a per-voxel estimate (``sr_pytorch.core``'s
-  ``_noise_level``: local std, smoothed, halved), the same auto-estimate
-  ``nlm_filter.py`` uses.
-* ``auto`` (or ``0``) — one global level from
-  ``sr_pytorch.noise_estimate.noise_estimate(volume)[0]`` (Rician/Koay by
-  default, ``--gauss`` for the Gaussian variant).
-* a number — that global level, on the volume's own intensity scale.
+* ``--auto-sigma-global`` — one uniform level estimated from the volume by
+  ``sr_pytorch.noise_estimate.noise_estimate`` (Rician/Koay by default,
+  ``--gauss`` for the Gaussian variant). **This is the default** when no
+  sigma flag is given.
+* ``--auto-sigma-voxel`` — a per-voxel estimate (``sr_pytorch.core``'s
+  ``_noise_level``: local std, smoothed, halved).
+* ``--sigma VALUE`` — that uniform level, on the volume's own intensity
+  scale.
+* ``--sigma-file FILE`` — a per-voxel noise map read from a MINC2 volume.
 
-This sigma-mode dispatch lives here, in the CLI, not inside
-``regularize()`` — see ``sr_pytorch/regularize.py``'s module docstring.
-There is no per-voxel ``--mask`` support for the ``auto`` global estimate
-in this first pass, even though ``noise_estimate`` itself accepts one; use
-``upsample/noise_estimate.py --mask`` to get a masked estimate and pass it
-back in with an explicit ``--sigma <value>``.
+This sigma dispatch lives here, in the CLI, not inside ``regularize()`` —
+see ``sr_pytorch/regularize.py``'s module docstring.
+
+There is no per-voxel ``--mask`` support for ``--auto-sigma-global``, even
+though ``noise_estimate`` itself accepts one; use ``upsample/noise_estimate.py
+--mask`` to get a masked estimate and pass it back in with an explicit
+``--sigma <value>``.
+
+Mean preservation
+-----------------
+``--factors FZ FY FX`` are the upsampling factors the input was interpolated
+with; the correction shifts each ``(fz, fy, fx)`` output block to match its
+input block's mean. It is enabled automatically whenever ``--factors`` is
+something other than ``1 1 1``, and can be forced off with
+``--no-mean-preserve``. Requesting ``--mean-preserve`` *with* ``1 1 1`` is
+rejected: every block would be a single voxel, so the correction would
+restore the input exactly and the whole filtering pass would be discarded.
 
 Examples
 --------
-    # auto per-voxel sigma, default v=3 f=1, GPU
+    # default: uniform auto-estimated sigma (Rician), v=3 f=1, GPU
     python upsample/denoise.py hr.mnc hr_denoised.mnc
 
-    # global auto-estimated sigma (Rician), doubled
-    python upsample/denoise.py hr.mnc hr_denoised.mnc --sigma auto --strength 2.0
+    # per-voxel auto-estimated sigma, smoothing doubled
+    python upsample/denoise.py hr.mnc hr_denoised.mnc --auto-sigma-voxel \\
+        --strength 2.0
 
-    # explicit global sigma, CPU, affine-equivariant floor
+    # explicit uniform sigma, CPU, affine-equivariant floor
     python upsample/denoise.py hr.mnc hr_denoised.mnc --sigma 5.0 --device cpu \\
         --floor-mode scale
+
+    # post-process a volume interpolated with factors 2 1 1
+    python upsample/denoise.py hr.mnc hr_reg.mnc --factors 2 1 1
 """
 
 from __future__ import annotations
@@ -48,31 +65,44 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Optional, Sequence, Tuple
 
 import torch
-import torch.nn.functional as F
 
 _UPSAMPLE = Path(__file__).resolve().parent
 if str(_UPSAMPLE) not in sys.path:
     sys.path.insert(0, str(_UPSAMPLE))
 
 
-def _sigma(value: str):
-    """``--sigma`` takes one global noise level or the word for not having
-    one: 'auto' (or 0) estimates it from the volume, as mincnlm's ``-sigma
-    0``; a number uses it as given, on the volume's own scale."""
-    if value.lower() in ("auto", "0"):
-        return "auto"
+def _sigma(value: str) -> float:
+    """``--sigma`` takes one uniform noise level, on the volume's own
+    intensity scale. To have it estimated instead, use
+    ``--auto-sigma-global`` or ``--auto-sigma-voxel``."""
     level = float(value)
     if not level > 0:
         raise argparse.ArgumentTypeError(
-            "a global noise level is positive; 'auto' (or 0) estimates it")
+            "a noise level is positive; use --auto-sigma-global or "
+            "--auto-sigma-voxel to estimate one")
     return level
 
 
-def _parse_args() -> argparse.Namespace:
+def _resolve_mean_preserve(mean_preserve: Optional[bool],
+                           factors: Tuple[int, int, int]) -> bool:
+    """Mean preservation defaults to on only for non-trivial *factors*.
+
+    With ``factors == (1, 1, 1)`` every block is a single voxel, so the
+    correction reproduces the input exactly (see
+    ``sr_pytorch.regularize``); defaulting it off keeps a plain
+    ``denoise.py`` run an actual filtering pass.
+    """
+    if mean_preserve is None:
+        return tuple(factors) != (1, 1, 1)
+    return mean_preserve
+
+
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Single-pass non-local-means denoising of a MINC2 "
+        description="Single-pass non-local-means filtering of a MINC2 "
                     "volume (Manjon et al. 2010).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -84,9 +114,15 @@ def _parse_args() -> argparse.Namespace:
                         "and in nothing else")
     p.add_argument("--f", type=int, default=1,
                    help="Patch half-size (patch is (2f+1)^3 voxels)")
-    p.add_argument("--strength", type=float, default=1.0,
-                   help="Multiplies the estimated noise level; 0 is exactly "
-                        "the identity")
+
+    strength_grp = p.add_mutually_exclusive_group()
+    strength_grp.add_argument("--strength", type=float, default=1.0,
+                              help="Multiplies the estimated noise level; 0 "
+                                   "is exactly the identity")
+    strength_grp.add_argument("--h", type=float, dest="strength",
+                              default=argparse.SUPPRESS,
+                              help=argparse.SUPPRESS)
+
     p.add_argument("--floor-mode", choices=["legacy", "scale"],
                    default="legacy",
                    help="'legacy' matches sr_pytorch.regularize's original "
@@ -94,21 +130,40 @@ def _parse_args() -> argparse.Namespace:
                         "volume's own dynamic range (affine-equivariant)")
 
     sigma_grp = p.add_mutually_exclusive_group()
+    sigma_grp.add_argument("--auto-sigma-global", action="store_true",
+                           help="estimate one uniform noise level from the "
+                                "volume (the default when no sigma flag is "
+                                "given)")
+    sigma_grp.add_argument("--auto-sigma-voxel", action="store_true",
+                           help="estimate a per-voxel noise level from the "
+                                "volume's local variance")
     sigma_grp.add_argument("--sigma", type=_sigma, default=None,
                            metavar="VALUE",
-                           help="use one global noise level instead of the "
-                                "per-voxel estimate: 'auto' (or 0) "
-                                "estimates it from the volume, a number "
-                                "uses it as given")
+                           help="use this uniform noise level, on the "
+                                "volume's own intensity scale")
     sigma_grp.add_argument("--sigma-file", type=Path, default=None,
                            metavar="FILE",
                            help="MINC2 file with a per-voxel noise-level "
                                 "map (must match the input's shape)")
 
     p.add_argument("--gauss", action="store_true",
-                   help="the automatic global level's noise model: Rician "
+                   help="--auto-sigma-global's noise model: Rician "
                         "(Koay-corrected) by default, Gaussian with this "
                         "flag")
+
+    p.add_argument("--factors", nargs=3, type=int, default=[1, 1, 1],
+                   metavar=("FZ", "FY", "FX"),
+                   help="Upsampling factors the input was interpolated with; "
+                        "enables the block-mean correction when not 1 1 1")
+    mp_grp = p.add_mutually_exclusive_group()
+    mp_grp.add_argument("--mean-preserve", dest="mean_preserve",
+                        action="store_true", default=None,
+                        help="Force the block-mean correction on (invalid "
+                             "with --factors 1 1 1, where it is the identity)")
+    mp_grp.add_argument("--no-mean-preserve", dest="mean_preserve",
+                        action="store_false",
+                        help="Force the block-mean correction off")
+
     p.add_argument("--device", default=None, metavar="DEVICE",
                    help="PyTorch device, e.g. 'cuda'. Defaults to 'cuda' "
                         "if available, else 'cpu'")
@@ -117,21 +172,69 @@ def _parse_args() -> argparse.Namespace:
                         "CUDA, float64 on CPU")
     p.add_argument("--verbose", action="store_true",
                    help="Print progress and parameter summary")
-    return p.parse_args()
+    return p
 
 
-def _auto_sigma(vol_t: torch.Tensor) -> torch.Tensor:
-    """Per-voxel noise level (matches sr_pytorch.core._noise_level)."""
-    vol5 = vol_t.unsqueeze(0).unsqueeze(0)
-    padded = F.pad(vol5, [1] * 6, mode="reflect")
-    padded_sq = F.pad(vol5.pow(2), [1] * 6, mode="reflect")
-    lmean = F.avg_pool3d(padded, kernel_size=3, stride=1, padding=0)
-    lsqmean = F.avg_pool3d(padded_sq, kernel_size=3, stride=1, padding=0)
-    sigma = (lsqmean - lmean.pow(2)).clamp(min=0).sqrt().squeeze(0).squeeze(0)
-    sig5 = sigma.unsqueeze(0).unsqueeze(0)
-    padded_s = F.pad(sig5, [1] * 6, mode="reflect")
-    smoothed = F.avg_pool3d(padded_s, kernel_size=3, stride=1, padding=0)
-    return (smoothed / 2.0).squeeze(0).squeeze(0)
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    p = _build_parser()
+    args = p.parse_args(argv)
+
+    if args.gauss and not args.auto_sigma_global:
+        p.error("--gauss selects the noise model of the automatic uniform "
+                "estimate; it is only meaningful with --auto-sigma-global")
+
+    factors = tuple(args.factors)
+    if args.mean_preserve and factors == (1, 1, 1):
+        p.error("--mean-preserve with --factors 1 1 1 is the identity: every "
+                "block is a single voxel, so the correction restores the "
+                "input and discards the whole filtering pass. Pass real "
+                "--factors, or drop --mean-preserve")
+
+    return args
+
+
+def _build_sigma(args: argparse.Namespace, vol_t: torch.Tensor,
+                 shape) -> torch.Tensor:
+    """Resolve whichever sigma flag was given into a per-voxel tensor."""
+    if args.sigma_file is not None:
+        from sr.minc.io import load_minc_volume_np
+
+        if args.verbose:
+            print(f"Loading sigma from {args.sigma_file}")
+        try:
+            sig_np, _ = load_minc_volume_np(str(args.sigma_file))
+        except Exception as exc:
+            sys.exit(f"ERROR loading sigma file {args.sigma_file}: {exc}")
+        if sig_np.shape != shape:
+            sys.exit(
+                f"ERROR: sigma file shape {sig_np.shape} != "
+                f"input shape {shape}"
+            )
+        return torch.from_numpy(sig_np).to(device=vol_t.device,
+                                           dtype=vol_t.dtype)
+
+    if args.sigma is not None:
+        if args.verbose:
+            print(f"Uniform sigma: {args.sigma}")
+        return torch.full_like(vol_t, float(args.sigma))
+
+    if args.auto_sigma_voxel:
+        from sr_pytorch.core import _noise_level
+
+        if args.verbose:
+            print("Estimating per-voxel sigma from input volume ...")
+        return _noise_level(vol_t)
+
+    # --auto-sigma-global, and the default when no sigma flag is given.
+    from sr_pytorch.noise_estimate import noise_estimate
+
+    if args.verbose:
+        print("Estimating uniform sigma (noise_estimate) ...")
+    level, mean_signal = noise_estimate(vol_t.to(torch.float64),
+                                        gaussian=args.gauss)
+    if args.verbose:
+        print(f"  uniform sigma={level:.4f}  mean_signal={mean_signal:.4f}")
+    return torch.full_like(vol_t, float(level))
 
 
 def main() -> None:
@@ -151,10 +254,14 @@ def main() -> None:
     else:
         dtype = torch.float32 if device.type == "cuda" else torch.float64
 
+    factors = tuple(args.factors)
+    mean_preserve = _resolve_mean_preserve(args.mean_preserve, factors)
+
     if args.verbose:
         print(f"Device  : {device}  dtype={dtype}")
         print(f"Params  : v={args.v}  f={args.f}  strength={args.strength}  "
               f"floor_mode={args.floor_mode}")
+        print(f"          factors={factors}  mean_preserve={mean_preserve}")
 
     if args.verbose:
         print(f"Loading {args.input}")
@@ -168,39 +275,7 @@ def main() -> None:
 
     vol_t = torch.from_numpy(vol_np).to(device=device, dtype=dtype)
 
-    # ---- sigma-mode dispatch: resolve whatever the user asked for into a
-    # per-voxel tensor here, in the CLI, before calling regularize() ---------
-    if args.sigma_file is not None:
-        if args.verbose:
-            print(f"Loading sigma from {args.sigma_file}")
-        try:
-            sig_np, _ = load_minc_volume_np(str(args.sigma_file))
-        except Exception as exc:
-            sys.exit(f"ERROR loading sigma file {args.sigma_file}: {exc}")
-        if sig_np.shape != vol_np.shape:
-            sys.exit(
-                f"ERROR: sigma file shape {sig_np.shape} != "
-                f"input shape {vol_np.shape}"
-            )
-        sigma_t = torch.from_numpy(sig_np).to(device=device, dtype=dtype)
-
-    elif args.sigma is None:
-        if args.verbose:
-            print("Estimating per-voxel sigma from input volume ...")
-        sigma_t = _auto_sigma(vol_t)
-
-    else:
-        if args.sigma == "auto":
-            from sr_pytorch.noise_estimate import noise_estimate
-            if args.verbose:
-                print("Estimating global sigma (noise_estimate) ...")
-            level, mean_signal = noise_estimate(
-                vol_t.to(torch.float64), gaussian=args.gauss)
-            if args.verbose:
-                print(f"  global sigma={level:.4f}  mean_signal={mean_signal:.4f}")
-        else:
-            level = args.sigma
-        sigma_t = torch.full_like(vol_t, float(level))
+    sigma_t = _build_sigma(args, vol_t, vol_np.shape)
 
     if args.verbose:
         sig_np_report = sigma_t.detach().cpu().numpy()
@@ -210,11 +285,11 @@ def main() -> None:
     from sr_pytorch.regularize import regularize
 
     if args.verbose:
-        print("Running NLM denoising ...")
+        print("Running NLM filtering ...")
 
     start = time.time()
-    out_t = regularize(vol_t, args.v, args.f, sigma_t, factors=(1, 1, 1),
-                       mean_preserve=False, strength=args.strength,
+    out_t = regularize(vol_t, args.v, args.f, sigma_t, factors=factors,
+                       mean_preserve=mean_preserve, strength=args.strength,
                        floor_mode=args.floor_mode)
     elapsed = time.time() - start
     out_np = out_t.cpu().to(torch.float64).numpy()

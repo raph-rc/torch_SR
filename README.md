@@ -130,33 +130,31 @@ built, else `pytorch`), `--v`/`--f` (search radius / patch half-size),
 (spline interpolation only, no NLM), `--device`, `--n-steps`/`--lr` (for
 `--method optimize`), `--verbose`.
 
-**`denoise.py`** — single-pass NLM denoising (`factors=(1,1,1)`, no
-block-mean correction):
+**`denoise.py`** — single NLM pass, exposing `sr_pytorch.regularize.regularize`
+directly: plain denoising by default, or regularization of an already
+spline-interpolated volume when given `--factors`:
 
 ```bash
-python denoise.py hr.mnc hr_denoised.mnc --sigma auto --strength 2.0
+python denoise.py hr.mnc hr_denoised.mnc --strength 2.0
+python denoise.py hr.mnc hr_reg.mnc --factors 2 1 1
 ```
 
-`--sigma`: omitted for a per-voxel local-variance estimate (default), `auto`
-(or `0`) for one global level from `sr_pytorch.noise_estimate`, or a numeric
-value; mutually exclusive with `--sigma-file` (a per-voxel noise map as a
-MINC2 volume). `--strength` scales the estimated noise level (`0` is the
+The noise level comes from exactly one of four mutually exclusive flags:
+`--auto-sigma-global` (one uniform level from `sr_pytorch.noise_estimate`,
+**the default** when none is given), `--auto-sigma-voxel` (a per-voxel
+local-variance estimate), `--sigma VALUE` (that uniform level) or
+`--sigma-file FILE` (a per-voxel noise map as a MINC2 volume). `--gauss`
+switches the automatic uniform estimate from Rician (default) to Gaussian.
+
+`--strength` scales the noise level however it was obtained (`0` is the
 identity). `--floor-mode legacy|scale` selects the fixed noise floor
-(`legacy`, default) or one derived from the volume's dynamic range
-(`scale`, affine-equivariant). `--gauss` switches the `auto` estimate from
-Rician (default) to Gaussian.
-
-**`nlm_filter.py`** — single NLM regularization pass, exposing
-`sr_pytorch.regularize.regularize` directly, including its block-mean
-preservation (`--factors`, useful when post-processing an already
-spline-interpolated volume):
-
-```bash
-python nlm_filter.py hr.mnc hr_reg.mnc --sigma 5.0 --device cpu
-```
-
-`--h` scales sigma (`>1` increases smoothing); `--no-mean-preserve` disables
-the block-mean correction for pure denoising use.
+(`legacy`, default) or one derived from the volume's dynamic range (`scale`,
+affine-equivariant). `--factors FZ FY FX` are the upsampling factors the
+input was interpolated with; the block-mean correction is enabled
+automatically whenever they are not `1 1 1`, and `--no-mean-preserve` forces
+it off. Combining `--mean-preserve` with `--factors 1 1 1` is rejected: every
+block would be a single voxel, so the correction would restore the input
+exactly and discard the filtering pass.
 
 **`noise_estimate.py`** — Rician/Gaussian noise-level or SNR estimate:
 
@@ -214,7 +212,7 @@ Authorship in this repository splits by origin:
   `cMRegularizarNLM3D_V2.c` that `upsample/sr/nlm_core.c` ports.
 - All Python code and all tests in this repository — `upsample/sr/`,
   `upsample/sr_pytorch/`, the top-level CLI scripts (`upsample.py`,
-  `denoise.py`, `nlm_filter.py`, `noise_estimate.py`), `upsample/scripts/`,
+  `denoise.py`, `noise_estimate.py`), `upsample/scripts/`,
   the Python build/wrapper code under `upsample/_legacy/`, and the
   `upsample/tests/` suite — were written by Claude Code.
 - This `README.md` was likewise written by Claude Code, from a survey of
