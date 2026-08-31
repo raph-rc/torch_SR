@@ -33,3 +33,13 @@ Both are nevertheless derivatives of a GPL-licensed work by descent, and are
 recorded here as such. Anyone redistributing this repository should settle
 this against the terms of any other license applied to the rest of the
 codebase before doing so.
+
+`upsample/_legacy/ezminc/` is a separate, unrelated piece of vendored code:
+the EZminc project's `mincnlm`/`minc_anlm`/`noise_estimate` tools (Coupe
+et al.), backported byte-for-byte from the sibling `torch_n3` project so
+this repository can test `sr_pytorch.noise_estimate`/`sr_pytorch.dwt`
+against a byte-level oracle. It carries no repository-wide license, only
+per-file/per-algorithm copyright notices — see
+`upsample/_legacy/ezminc/README.md` for the details and for why it is *not*
+an oracle for this repository's own NLM filter (a different algorithm
+convention).

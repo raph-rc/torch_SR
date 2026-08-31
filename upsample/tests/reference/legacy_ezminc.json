@@ -1,0 +1,11 @@
+{
+  "produced_by": "program: 2.5.01; libminc: 2.5.01; netcdf : 4.7.4 of Jul 29 2026 15:55:45 $; HDF5   : 1.12.1",
+  "values": {
+    "noise_estimate.chunk_mask_noise": 24589.9,
+    "noise_estimate.chunk_mask_snr": 15.1991,
+    "noise_estimate.chunk_noise": 24273.4,
+    "noise_estimate.chunk_noise_gauss": 24251.8,
+    "noise_estimate.chunk_snr": 16.8351,
+    "noise_estimate.chunk_snr_gauss": 16.85
+  }
+}

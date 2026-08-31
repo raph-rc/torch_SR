@@ -39,6 +39,16 @@ upsample/data/               sample .mnc volumes for testing (not committed)
 upsample/scripts/
   nlm_upsample.py            CLI: input.mnc output.mnc [options]
 
+upsample/_legacy/            Vendored EZminc oracle (CFFI), backported from torch_n3
+  ezminc/                    vendored C++ sources — do not modify, see its README.md
+  compat/                    volume_io.h/time_stamp.h/ParseArgv.h stand-ins
+  build_legacy.py            cffi out-of-line build script (run once)
+  legacy_ezminc.py           Python wrapper: noise_estimate/dwt_forward/mincnlm/minc_anlm
+
+upsample/tests/reference.py, regenerate_reference.py, reference/legacy_ezminc.{npz,json}
+  recorded answers of the installed noise_estimate/mincnlm/minc_anlm programs,
+  compared against the CFFI shim in test_ezminc_backend.py
+
 legacy/                      Original Matlab/C reference (read-only)
   demo/NLMUpsample/NLMUpsample2.m                top-level Matlab driver
   demo/NLMUpsample/linux-mac code/cMRegularizarNLM3D_V2.c  C MEX core
@@ -58,6 +68,14 @@ pip install -r requirements.txt
 
 # Build the C extension (run once; produces sr/_nlm_core.*.so)
 python sr/_nlm_build.py
+
+# Build the vendored EZminc oracle extensions (run once; needs GSL, the
+# toolkit's static FFTW, and /opt/minc/1.9.18.13 on this machine; produces
+# _legacy/_ezminclegacy.*.so and _legacy/_ezminc_anlm.*.so). Backs the
+# oracle-comparison tests in test_ezminc_backend.py, test_dwt.py and
+# test_noise_estimate.py; see upsample/_legacy/ezminc/README.md and
+# COPYING.NLM.
+python _legacy/build_legacy.py
 
 # Run all tests (interpolate tests run without C ext; others auto-skip)
 pytest tests/
@@ -263,4 +281,9 @@ logger.debug("Convergence metric d2=%.6f (tol=%.4f)", d2, tol)
 - Tests run on every push to `main` via pytest.
 - `mypy sr/` must pass with no errors.
 - `black --check sr/ tests/` and `flake8 sr/ tests/` must pass.
-- Do not commit binary files or large test volumes to the repository.
+- Do not commit binary files or large test volumes to the repository. The one
+  exception is `tests/data/chunk.mnc`/`chunk_mask.mnc` (91x52x50, ~400 KB),
+  the small fixed input the EZminc oracle-comparison tests and
+  `tests/regenerate_reference.py` need, mirroring `torch_n3/tests/data/`'s
+  own convention for the same files (`.gitignore` carves out an explicit
+  exception to the repo-wide `*.mnc` rule for them).

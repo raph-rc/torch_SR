@@ -4,3 +4,7 @@ __pycache__
 *.o
 *.egg-info
 *.mnc
+!upsample/tests/data/*.mnc
+
+# Build products of upsample/_legacy/build_legacy.py
+/upsample/_legacy/build/

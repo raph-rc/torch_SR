@@ -1,9 +1,7 @@
-"""Property tests for sr_pytorch.noise_estimate (Rician/Gaussian noise level).
-
-Ported from torch_n3's ``tests/test_noise_estimate.py``, minus the
-comparison against ``torch_n3.backends.legacy`` (the vendored EZminc C++
-oracle): torch_SR has no such oracle, so only self-consistency and
-known-input properties are asserted here.
+"""Property tests for sr_pytorch.noise_estimate (Rician/Gaussian noise level),
+plus a direct comparison against the vendored EZminc oracle (``_legacy``,
+backported alongside these tests -- see ``upsample/_legacy/ezminc/README.md``
+and ``tests/test_ezminc_backend.py``).
 
 Note: ``noise_estimate`` casts its input to float64 internally
 (``sr_pytorch/noise_estimate.py``), so the float32/float64 precision risk
@@ -14,7 +12,12 @@ noted during planning applies to ``sr_pytorch.dwt`` when used directly
 import pytest
 import torch
 
+from _legacy import legacy_ezminc
 from sr_pytorch.noise_estimate import noise_estimate
+
+_requires_legacy_ext = pytest.mark.skipif(
+    not legacy_ezminc.have_legacy_ext(),
+    reason="EZminc extensions not built -- run: python _legacy/build_legacy.py")
 
 
 def _phantom(shape=(32, 32, 32), seed=0):
@@ -95,3 +98,41 @@ def test_device_parity_cpu_cuda():
     noise_cuda, signal_cuda = noise_estimate(noisy_cuda)
     assert noise_cpu == pytest.approx(noise_cuda, rel=1e-6)
     assert signal_cpu == pytest.approx(signal_cuda, rel=1e-6)
+
+
+@_requires_legacy_ext
+def test_rician_unmasked_matches_legacy(chunk):
+    """The Rician estimate and the mean signal it implies, on ``chunk``."""
+    got = noise_estimate(chunk)
+    want = legacy_ezminc.noise_estimate(chunk)
+    assert got[0] == pytest.approx(want[0], rel=1e-4)
+    assert got[1] == pytest.approx(want[1], rel=1e-4)
+
+
+@_requires_legacy_ext
+def test_gaussian_unmasked_matches_legacy(chunk):
+    """The Gaussian assumption skips the Koay correction entirely."""
+    got = noise_estimate(chunk, gaussian=True)
+    want = legacy_ezminc.noise_estimate(chunk, gaussian=True)
+    assert got[0] == pytest.approx(want[0], rel=1e-4)
+    assert got[1] == pytest.approx(want[1], rel=1e-4)
+
+
+@_requires_legacy_ext
+def test_masked_matches_legacy(chunk, chunk_mask):
+    """A supplied mask replaces the k-means object detection."""
+    got = noise_estimate(chunk, mask=chunk_mask)
+    want = legacy_ezminc.noise_estimate(chunk, mask=chunk_mask)
+    assert got[0] == pytest.approx(want[0], rel=1e-4)
+    assert got[1] == pytest.approx(want[1], rel=1e-4)
+
+
+@_requires_legacy_ext
+def test_odd_extent_masked_matches_legacy(chunk, chunk_mask):
+    """An odd, non-power-of-two extent exercises the upsample trim."""
+    vol = chunk[..., :89]
+    mask = chunk_mask[..., :89]
+    got = noise_estimate(vol, mask=mask)
+    want = legacy_ezminc.noise_estimate(vol, mask=mask)
+    assert got[0] == pytest.approx(want[0], rel=1e-4)
+    assert got[1] == pytest.approx(want[1], rel=1e-4)
