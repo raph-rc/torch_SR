@@ -39,14 +39,72 @@ Gradient modes
     all; use for inference / upsampling pipelines where gradients are not
     needed.  Setting ``no_grad=False`` while keeping ``detach_weights=True``
     is the recommended mode for use inside a training loop.
+
+Denoising extensions (``strength``, ``floor_mode``)
+----------------------------------------------------
+Backported from ``torch_n3.blocks.denoise`` — a fork of this file, made for
+plain denoising rather than SR upsampling — which added a ``strength``
+multiplier and an affine-equivariant noise floor.  Both are opt-in and
+default to exactly today's behaviour, so every existing caller
+(``sr_pytorch/core.py``, ``sr_pytorch/optimize.py``, ``upsample/nlm_filter.py``,
+and the PSNR floors in ``tests/test_psnr.py``) is unaffected.
+
+``strength`` (default ``1.0``)
+    Multiplies ``sigma`` before it is used, so ``strength=0`` disables all
+    smoothing (weights collapse once every voxel falls below the floor) and
+    values above 1 smooth harder.
+
+``floor_mode`` (default ``"legacy"``)
+    Governs the noise floor below which a voxel's ``sigma`` is treated as
+    inaudible and its weights are zeroed (kept flat instead of dividing by a
+    near-zero variance).  ``"legacy"`` is today's behaviour exactly: a fixed
+    ``sigma.pow(2).clamp(min=1e-10)`` in the denominator and a fixed
+    ``sigma >= 1.0`` gate — both are *absolute* thresholds on whatever
+    intensity scale the caller's volume happens to be on.  ``"scale"``
+    instead derives the floor from the volume's own dynamic range (1st-99th
+    percentile spread, scaled against ``DEFAULT_SCALE``), which makes the
+    filter affine-equivariant: ``regularize(a*v+b, ...) == a*regularize(v,
+    ...)+b`` for the same relative ``sigma``.  See
+    ``torch_n3/blocks/denoise.py``'s module docstring ("The one number that
+    carries the intensity scale") for the full reasoning; ``_scale`` below is
+    ported unchanged from there.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Tuple
 
 import torch
 import torch.nn.functional as F
+
+#: The intensity scale :data:`SIGMA_FLOOR` is calibrated on, used only when
+#: ``floor_mode="scale"``.
+DEFAULT_SCALE = 256.0
+
+#: A voxel whose ``sigma`` (after ``strength``) is below this, on
+#: :data:`DEFAULT_SCALE`, is left untouched when ``floor_mode="scale"``.
+SIGMA_FLOOR = 1.0
+
+#: The centiles whose separation stands for the volume's dynamic range when
+#: :data:`SIGMA_FLOOR` is carried onto its own scale.  See :func:`_scale`.
+SCALE_QUANTILES = (0.01, 0.99)
+
+
+def _scale(volume: torch.Tensor) -> float:
+    """The volume's dynamic range: the 1st-to-99th centile separation.
+
+    Ported unchanged from ``torch_n3.blocks.denoise._scale``.  Used only by
+    ``floor_mode="scale"``.  Nearest-rank centiles via ``kthvalue`` rather
+    than ``torch.quantile``, which refuses tensors above 2**24 elements (a
+    512**3 volume exceeds that eightfold) and does not rescale *exactly*
+    with the volume the way a selected order statistic does.
+    """
+    values = volume.reshape(-1)
+    count = values.numel()
+    low, high = (values.kthvalue(max(1, math.ceil(q * count))).values
+                for q in SCALE_QUANTILES)
+    return float(high - low)
 
 
 def regularize(
@@ -58,6 +116,8 @@ def regularize(
     mean_preserve: bool = True,
     detach_weights: bool = True,
     no_grad: bool = True,
+    strength: float = 1.0,
+    floor_mode: str = "legacy",
 ) -> torch.Tensor:
     """NLM regularization – PyTorch implementation.
 
@@ -77,16 +137,26 @@ def regularize(
         no_grad:        When ``True`` (default) the entire call runs inside
                         ``torch.no_grad()``, building no graph at all.
                         Set to ``False`` when calling from a training loop.
+        strength:       Multiplies *sigma* before use (default ``1.0``, a
+                        no-op).  ``0`` disables smoothing entirely.
+        floor_mode:     ``"legacy"`` (default) or ``"scale"`` — see the
+                        module docstring, "Denoising extensions".
 
     Returns:
         Regularized volume, same shape and device as *volume*.
     """
+    if floor_mode not in ("legacy", "scale"):
+        raise ValueError(
+            "regularize: floor_mode must be 'legacy' or 'scale' (got %r)"
+            % (floor_mode,))
     if no_grad:
         with torch.no_grad():
             return _regularize(volume, v, f, sigma, factors,
-                               mean_preserve, detach_weights=False)
+                               mean_preserve, detach_weights=False,
+                               strength=strength, floor_mode=floor_mode)
     return _regularize(volume, v, f, sigma, factors,
-                       mean_preserve, detach_weights)
+                       mean_preserve, detach_weights,
+                       strength=strength, floor_mode=floor_mode)
 
 
 def _regularize(
@@ -97,7 +167,11 @@ def _regularize(
     factors: Tuple[int, int, int],
     mean_preserve: bool,
     detach_weights: bool,
+    strength: float = 1.0,
+    floor_mode: str = "legacy",
 ) -> torch.Tensor:
+    if strength != 1.0:
+        sigma = sigma * strength
     D, H, W = volume.shape
     fz, fy, fx = factors
     patch_k = 2 * f + 1
@@ -132,8 +206,19 @@ def _regularize(
     local_mean = lm_pad[v : v + D, v : v + H, v : v + W]
 
     # ---- per-voxel noise² --------------------------------------------------
-    h_sq = sigma.pow(2).clamp(min=1e-10)
-    sigma_mask = sigma >= 1.0
+    if floor_mode == "scale":
+        scale = _scale(volume)
+        if not scale > 0.0:
+            raise ValueError(
+                "regularize: floor_mode='scale' needs a volume with nonzero "
+                "dynamic range (%g-%g centile spread was %g)"
+                % (SCALE_QUANTILES[0], SCALE_QUANTILES[1], scale))
+        floor = SIGMA_FLOOR * scale / DEFAULT_SCALE
+        h_sq = sigma.clamp(min=floor).pow(2)
+        sigma_mask = sigma >= floor
+    else:
+        h_sq = sigma.pow(2).clamp(min=1e-10)
+        sigma_mask = sigma >= 1.0
 
     # ---- NLM accumulation --------------------------------------------------
     weighted_sum = volume.new_zeros(D, H, W)

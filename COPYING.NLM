@@ -1,0 +1,35 @@
+Provenance of the non-local-means (NLM) code in this repository
+=================================================================
+
+This repository implements the non-local-means filter of
+
+    Manjon, J. V., Coupe, P., Buades, A., Fonov, V., Collins, D. L., &
+    Robles, M. (2010).  "Non-local MRI upsampling."
+    Medical Image Analysis 14(6), 784-792.
+
+Copyright (C) 2010 Jose V. Manjon and Pierrick Coupe.
+
+The authors' own distribution of the method is Matlab plus a C MEX kernel,
+`legacy/demo/NLMUpsample/linux-mac code/cMRegularizarNLM3D_V2.c`, which is
+stated by its accompanying header to be GPL-licensed. Two things in this
+repository descend from it:
+
+`upsample/sr/nlm_core.c`
+    A direct, MEX-free port of the same C kernel.
+
+`upsample/sr_pytorch/regularize.py`
+    A PyTorch reimplementation of the same computation, carrying none of the
+    C kernel's code: it is written as whole-volume tensor operations rather
+    than as the original's per-voxel loop. It also differs from the C
+    kernel by convention, not only by expression: the C code visits each
+    pair of voxels once and uses the *first* voxel's sigma/local mean for
+    both directions of the symmetric update, while this gathers, visiting
+    each ordered pair from both ends and using each centre's own -- the two
+    are not meant to be reconciled. (Documented at greater length in the N3
+    project this file's ``strength``/``floor_mode`` denoising extensions
+    were themselves backported from, `torch_n3/blocks/denoise.py`.)
+
+Both are nevertheless derivatives of a GPL-licensed work by descent, and are
+recorded here as such. Anyone redistributing this repository should settle
+this against the terms of any other license applied to the rest of the
+codebase before doing so.
