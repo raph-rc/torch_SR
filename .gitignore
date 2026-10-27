@@ -8,3 +8,5 @@ __pycache__
 
 # Build products of upsample/_legacy/build_legacy.py
 /upsample/_legacy/build/
+
+.venv

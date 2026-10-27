@@ -27,8 +27,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from sr.interpolate import initial_interpolation
-from .regularize import regularize
+# from sr.interpolate import initial_interpolation
+from interpolate import initial_interpolation
+# from .regularize import regularize
+from regularize import regularize
 
 logger = logging.getLogger(__name__)
 
@@ -39,21 +41,21 @@ logger = logging.getLogger(__name__)
 
 def _local_std(vol: torch.Tensor) -> torch.Tensor:
     """Population std in a 3×3×3 neighbourhood (reflect BC)."""
-    vol5 = vol.unsqueeze(0).unsqueeze(0)
+    vol5 = vol.unsqueeze(0)
     padded    = F.pad(vol5,        [1] * 6, mode="reflect")
     padded_sq = F.pad(vol5.pow(2), [1] * 6, mode="reflect")
     lmean    = F.avg_pool3d(padded,    kernel_size=3, stride=1, padding=0)
     lsqmean  = F.avg_pool3d(padded_sq, kernel_size=3, stride=1, padding=0)
-    return (lsqmean - lmean.pow(2)).clamp(min=0.0).sqrt().squeeze(0).squeeze(0)
+    return (lsqmean - lmean.pow(2)).clamp(min=0.0).sqrt().squeeze(0)
 
 
 def _noise_level(vol: torch.Tensor) -> torch.Tensor:
     """Per-voxel noise level: smooth local std then halve."""
     sigma = _local_std(vol)
-    sig5  = sigma.unsqueeze(0).unsqueeze(0)
-    padded = F.pad(sig5, [1] * 6, mode="reflect")
+    sig4 = sigma.unsqueeze(0)
+    padded = F.pad(sig4, [1] * 6, mode="reflect")
     smoothed = F.avg_pool3d(padded, kernel_size=3, stride=1, padding=0)
-    return (smoothed / 2.0).squeeze(0).squeeze(0)
+    return (smoothed / 2.0).squeeze(0)
 
 
 # ---------------------------------------------------------------------------
